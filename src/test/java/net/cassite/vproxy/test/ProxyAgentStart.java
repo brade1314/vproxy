@@ -1,7 +1,6 @@
 package net.cassite.vproxy.test;
 
 import net.cassite.vproxyx.WebSocksProxyAgent;
-import org.junit.Test;
 
 /**
  * <p>Title: ProxyAgentStart </p>
