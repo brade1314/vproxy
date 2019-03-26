@@ -18,9 +18,7 @@ import javax.net.ssl.SSLEngine;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Base64;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.function.Consumer;
 
 public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvider {
@@ -76,15 +74,17 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
             }
         }
 
+        private final String alias;
         private final PoolCallback cb;
 
-        WebSocksPoolHandler(PoolCallback cb) {
+        WebSocksPoolHandler(String alias, PoolCallback cb) {
+            this.alias = alias;
             this.cb = cb;
         }
 
         @Override
         public ClientConnection provide(NetEventLoop loop) {
-            SvrHandleConnector connector = servers.next();
+            SvrHandleConnector connector = servers.get(alias).next();
             if (connector == null) {
                 assert Logger.lowLevelDebug("no available remote server connector for now");
                 return null;
@@ -93,7 +93,7 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
             ClientConnection conn;
             try {
                 if (useSSL) {
-                    conn = CommonProcess.makeSSLConnection(loop.getSelectorEventLoop(), connector);
+                    conn = CommonProcess.makeSSLConnection(connector);
                 } else {
                     conn = connector.connect(RingBuffer.allocateDirect(16384), RingBuffer.allocateDirect(16384));
                 }
@@ -472,7 +472,8 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
 
         @Override
         public void closed(ConnectionHandlerContext ctx) {
-            assert Logger.lowLevelDebug("connection " + ctx.connection + " closed");
+            Logger.warn(LogType.CONN_ERROR, "connection " + ctx.connection + " closed, so the proxy cannot establish");
+            utilAlertFail(ctx);
         }
 
         @Override
@@ -482,6 +483,10 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
     }
 
     static class CommonProcess {
+        static ClientConnection makeSSLConnection(SvrHandleConnector connector) throws IOException {
+            return makeSSLConnection(null, connector);
+        }
+
         static ClientConnection makeSSLConnection(SelectorEventLoop loop, SvrHandleConnector connector) throws IOException {
             SSLEngine engine;
             if (connector.getHostName() == null) {
@@ -490,13 +495,24 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
                 engine = WebSocksUtils.getSslContext().createSSLEngine(connector.getHostName(), connector.remote.getPort());
             }
             engine.setUseClientMode(true);
-            SSLUtils.SSLBufferPair pair = SSLUtils.genbuf(
-                engine,
-                RingBuffer.allocate(16384),
-                RingBuffer.allocate(16384),
-                32768,
-                32768,
-                loop);
+            SSLUtils.SSLBufferPair pair;
+            if (loop == null) {
+                assert Logger.lowLevelDebug("event loop not specified, so we ignore the resumer for the ssl buffer pair");
+                pair = SSLUtils.genbuf(
+                    engine,
+                    RingBuffer.allocate(SSLUtils.PLAIN_TEXT_SIZE),
+                    RingBuffer.allocate(16384),
+                    32768,
+                    32768);
+            } else {
+                pair = SSLUtils.genbuf(
+                    engine,
+                    RingBuffer.allocate(SSLUtils.PLAIN_TEXT_SIZE),
+                    RingBuffer.allocate(16384),
+                    32768,
+                    32768,
+                    loop);
+            }
             return connector.connect(pair.left, pair.right);
         }
 
@@ -553,45 +569,53 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
     }
 
     private final boolean strictMode;
-    private final List<DomainChecker> proxyDomains;
-    private final ServerGroup servers;
+    private final Map<String, List<DomainChecker>> proxyDomains;
+    private final Map<String, ServerGroup> servers;
     private final String user;
     private final String pass;
-    private final ConnectionPool pool;
+    private final Map<String, ConnectionPool> pool;
 
-    public WebSocksProxyAgentConnectorProvider(ServerGroup servers,
-                                               NetEventLoop eventLoop,
+    public WebSocksProxyAgentConnectorProvider(NetEventLoop eventLoop,
                                                ConfigProcessor config) {
         this.strictMode = config.isStrictMode();
         this.proxyDomains = config.getDomains();
-        this.servers = servers;
+        this.servers = config.getServers();
         this.user = config.getUser();
         this.pass = config.getPass();
 
-        pool = new ConnectionPool(eventLoop, WebSocksPoolHandler::new, config.getPoolSize());
+        pool = new HashMap<>();
+        for (String alias : config.getServers().keySet()) {
+            final String finalAlias = alias;
+            pool.put(alias, new ConnectionPool(eventLoop,
+                cb -> new WebSocksPoolHandler(finalAlias, cb),
+                config.getPoolSize()));
+        }
     }
 
-    private boolean needProxy(String address) {
-        for (DomainChecker checker : proxyDomains) {
-            if (checker.needProxy(address)) {
-                return true;
+    private String getProxy(String address, int port) {
+        for (Map.Entry<String, List<DomainChecker>> entry : proxyDomains.entrySet()) {
+            for (DomainChecker checker : entry.getValue()) {
+                if (checker.needProxy(address, port)) {
+                    return entry.getKey();
+                }
             }
         }
-        return false;
+        return null;
     }
 
     @Override
     public void provide(Connection accepted, AddressType type, String address, int port, Consumer<Connector> providedCallback) {
         // check whether need to proxy to the WebSocks server
-        if (!needProxy(address)) {
-            Logger.alert("directly request " + address);
+        String serverAlias = getProxy(address, port);
+        if (serverAlias == null) {
+            Logger.alert("directly request " + address + ":" + port);
             // just directly connect to the endpoint
             Utils.directConnect(type, address, port, providedCallback);
             return;
         }
 
         // proxy the net flow using WebSocks
-        Logger.alert("proxy the request to " + address);
+        Logger.alert("proxy the request to " + address + ":" + port + " via " + serverAlias);
 
         NetEventLoop loop = accepted.getEventLoop();
         if (loop == null) {
@@ -601,11 +625,11 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
         }
 
         // try to fetch an existing connection from pool
-        pool.get(loop.getSelectorEventLoop(), conn -> {
+        pool.get(serverAlias).get(loop.getSelectorEventLoop(), conn -> {
             boolean isPooledConn = conn != null;
             if (conn == null) {
                 // retrieve a remote connection
-                SvrHandleConnector connector = servers.next();
+                SvrHandleConnector connector = servers.get(serverAlias).next();
                 if (connector == null) {
                     // no connectors for now
                     // the process is definitely cannot proceed

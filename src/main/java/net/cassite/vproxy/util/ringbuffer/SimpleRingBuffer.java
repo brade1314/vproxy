@@ -230,6 +230,7 @@ public class SimpleRingBuffer implements RingBuffer, ByteBufferRingBuffer {
         operatingBuffer = true;
 
         boolean triggerWritable = false;
+        int bytesBeforeOperating = used();
 
         assert Logger.lowLevelNetDebug("before operate write out, sPos=" + sPos);
 
@@ -239,8 +240,13 @@ public class SimpleRingBuffer implements RingBuffer, ByteBufferRingBuffer {
             boolean triggerWritablePre = free() == 0;
 
             int lim = retrieveLimit();
-            if (lim == 0)
-                return 0; // buffer is empty
+            // we don't check the lim
+            // just call the op even if it's 0
+            // this is used when ssl handshaking
+            // the application buffer may be empty
+            // but data can still be sent
+            // if (lim == 0)
+            //     return 0; // buffer is empty
             int realWrite = Math.min(lim, maxBytesToWrite);
             int newLimit = sPos + realWrite;
             buffer.limit(newLimit).position(sPos);
@@ -297,11 +303,20 @@ public class SimpleRingBuffer implements RingBuffer, ByteBufferRingBuffer {
         } finally { // do trigger here
             assert Logger.lowLevelNetDebug("after operate write out, sPos=" + sPos);
 
+            // was > 0 and now nothing
+            // which means all data had been flushed out
+            boolean flushAwareCondition = bytesBeforeOperating > 0 && used() == 0;
+
             operatingBuffer = false;
-            if (triggerWritable) {
+            if (triggerWritable || flushAwareCondition /*precondition, would check whether the handler is aware of*/) {
                 assert Logger.lowLevelNetDebug("trigger writable for " + handler.size() + " times");
                 for (RingBufferETHandler aHandler : handler) {
-                    aHandler.writableET();
+                    // because the preconditions are checked, so
+                    // if not triggerWritable, then flushAwareCondition is definitely true
+                    // no need to check for it again here
+                    if (triggerWritable || aHandler.flushAware()) {
+                        aHandler.writableET();
+                    }
                 }
             }
             resetFirst(firstOperator);

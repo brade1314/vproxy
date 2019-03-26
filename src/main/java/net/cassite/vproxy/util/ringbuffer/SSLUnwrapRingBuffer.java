@@ -1,5 +1,6 @@
 package net.cassite.vproxy.util.ringbuffer;
 
+import net.cassite.vproxy.selector.SelectorEventLoop;
 import net.cassite.vproxy.util.LogType;
 import net.cassite.vproxy.util.Logger;
 import net.cassite.vproxy.util.RingBuffer;
@@ -31,7 +32,15 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
 
         @Override
         public void writableET() {
-            generalUnwrap();
+            if (encryptedBufferForInput.used() > 0 && !isOperating()) {
+                assert Logger.lowLevelDebug("calling generalUnwrap from writableET");
+                generalUnwrap();
+            }
+        }
+
+        @Override
+        public boolean flushAware() {
+            return true;
         }
     }
 
@@ -45,6 +54,8 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
     // will call the pair's wrap/wrapHandshake when need to send data
     private final SSLWrapRingBuffer pair;
 
+    // only used when resume if resumer not specified
+    private SelectorEventLoop lastLoop = null;
     private boolean closed = false;
 
     SSLUnwrapRingBuffer(ByteBufferRingBuffer plainBufferForApp,
@@ -88,42 +99,58 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
     // -------------------
     private void deferDefragmentInput() {
         deferResumer.push(() -> {
-            encryptedBufferForInput.defragment();
-            generalUnwrap();
+            if (encryptedBufferForInput.canDefragment()) {
+                encryptedBufferForInput.defragment();
+                generalUnwrap();
+            }
         });
     }
 
     private void deferDefragmentApp() {
         deferResumer.push(() -> {
-            plainBufferForApp.defragment();
-            generalUnwrap();
+            if (plainBufferForApp.canDefragment()) {
+                plainBufferForApp.defragment();
+                generalUnwrap();
+            }
         });
-    }
-
-    private void deferGeneralUnwrap() {
-        deferResumer.push(this::generalUnwrap);
     }
 
     private void deferGeneralWrap() {
         deferResumer.add(pair::generalWrap);
     }
 
+    private void doResume(Runnable r) {
+        if (resumer == null && lastLoop == null) {
+            Logger.fatal(LogType.IMPROPER_USE, "cannot get resumer or event loop to callback from the task");
+            return; // cannot continue if no loop
+        }
+        if (resumer != null) {
+            resumer.accept(r);
+        } else {
+            //noinspection ConstantConditions
+            assert lastLoop != null;
+            lastLoop.runOnLoop(r);
+        }
+    }
+
     private void resumeGeneralUnwrap() {
-        resumer.accept(this::generalUnwrap);
+        doResume(this::generalUnwrap);
     }
 
     private void resumeGeneralWrap() {
-        resumer.accept(pair::generalWrap);
+        doResume(pair::generalWrap);
     }
     // -------------------
     // helper functions END
     // -------------------
 
     private void generalUnwrap() {
-        if (encryptedBufferForInput.used() == 0)
+        int usedBeforeUnwrap = encryptedBufferForInput.used();
+        if (usedBeforeUnwrap == 0)
             return; // no data for unwrapping
+        int usedAfterUnwrap; // will be set after operation done
         assert Logger.lowLevelDebug(
-            "encryptedBufferForInput has " + encryptedBufferForInput.used() + " bytes BEFORE unwrap");
+            "encryptedBufferForInput has " + usedBeforeUnwrap + " bytes BEFORE unwrap");
         boolean inBufferWasFull = encryptedBufferForInput.free() == 0;
         setOperating(true);
         try {
@@ -137,6 +164,10 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
                         return false;
                     }
                     assert Logger.lowLevelDebug("unwrap: " + result);
+                    if (result.getStatus() == SSLEngineResult.Status.CLOSED) {
+                        Logger.shouldNotHappen("the unwrapping returned CLOSED");
+                        return false;
+                    }
                     if (result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
                         return unwrap(result);
                     } else {
@@ -147,8 +178,9 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
             // it's memory operation, should not happen
             Logger.shouldNotHappen("got exception when unwrapping", e);
         } finally {
+            usedAfterUnwrap = encryptedBufferForInput.used();
             assert Logger.lowLevelDebug(
-                "encryptedBufferForInput has " + encryptedBufferForInput.used() + " bytes AFTER unwrap");
+                "encryptedBufferForInput has " + usedAfterUnwrap + " bytes AFTER unwrap");
             boolean inBufferNowNotFull = encryptedBufferForInput.free() > 0;
             if (inBufferWasFull && inBufferNowNotFull) {
                 triggerWritable();
@@ -157,10 +189,27 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
         }
 
         // might need instantly resume
-        if (deferResumer.isEmpty())
-            return; // nothing to resume now
-        assert deferResumer.size() == 1;
-        deferResumer.poll().run();
+        if (!deferResumer.isEmpty()) {
+            assert deferResumer.size() == 1;
+            deferResumer.poll().run();
+        }
+
+        boolean gotBytesConsumed = usedAfterUnwrap != usedBeforeUnwrap;
+        if (encryptedBufferForInput.used() > 0 && gotBytesConsumed) {
+            assert Logger.lowLevelDebug("still getting input data, run recursively");
+            generalUnwrap();
+        }
+        // if data is not consumed, the app buffer does not have enough space to store bytes in
+        // or input buffer dose not have enough bytes to continue the process
+        //
+        // for the first condition, the process will resume in WritableHandler when app buffer is empty
+        // for the second condition, the process will resume when more data arrives
+        //
+        // so, if data is not consumed, we stop the handling
+        //
+        // and you should NOTE that:
+        // NO resume action in unwrap/unwrapHandshake
+        // unless defragment can be run on buffers
     }
 
     private boolean unwrapHandshake(SSLEngineResult result) {
@@ -168,9 +217,7 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
         if (result.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
             Logger.warn(LogType.SSL_ERROR, "BUFFER_UNDERFLOW for handshake unwrap, " +
                 "expecting " + engine.getSession().getPacketBufferSize());
-            if (encryptedBufferForInput.canDefragment()) {
-                deferDefragmentInput();
-            } // otherwise we wait until data is provided
+            deferDefragmentInput();
             return false;
         }
 
@@ -181,11 +228,15 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
         }
         if (status == SSLEngineResult.HandshakeStatus.FINISHED) {
             assert Logger.lowLevelDebug("handshake finished");
-            deferGeneralWrap();
+            deferGeneralWrap(); // we try to send data when handshaking is finished
             return true; // done
         }
         if (status == SSLEngineResult.HandshakeStatus.NEED_TASK) {
             assert Logger.lowLevelDebug("ssl engine returns NEED_TASK");
+            if (resumer == null) {
+                lastLoop = SelectorEventLoop.current();
+                assert Logger.lowLevelDebug("resumer not specified, so we use the current event loop: " + lastLoop);
+            }
             new Thread(() -> {
                 assert Logger.lowLevelDebug("TASK begins");
                 Runnable r;
@@ -196,7 +247,9 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
                 if (engine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_WRAP) {
                     resumeGeneralWrap();
                 } else if (engine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED) {
-                    resumeGeneralWrap();
+                    // when handshaking is finished
+                    resumeGeneralWrap(); // we try to send data
+                    resumeGeneralUnwrap(); // also, we try to read data
                 } else {
                     resumeGeneralUnwrap();
                 }
@@ -205,24 +258,17 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
         }
         if (status == SSLEngineResult.HandshakeStatus.NEED_WRAP) {
             // should call the pair to wrap
-            pair.generalWrap();
+            resumeGeneralWrap();
             return true;
         }
         assert status == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
-        // call again, in case some data not unwrapped
-        deferGeneralUnwrap();
         return true;
     }
 
     private boolean unwrap(SSLEngineResult result) {
         assert Logger.lowLevelDebug("unwrap: " + result);
         SSLEngineResult.Status status = result.getStatus();
-        if (status == SSLEngineResult.Status.CLOSED) {
-            Logger.shouldNotHappen("the unwrapping returned CLOSED");
-            return false;
-        }
         if (status == SSLEngineResult.Status.OK) {
-            deferGeneralUnwrap(); // in case some data left in input buffer
             return true; // done
         }
         if (status == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
@@ -242,7 +288,13 @@ public class SSLUnwrapRingBuffer extends AbstractRingBuffer implements RingBuffe
         if (status == SSLEngineResult.Status.BUFFER_OVERFLOW) {
             Logger.warn(LogType.SSL_ERROR, "BUFFER_OVERFLOW in unwrap, " +
                 "expecting " + engine.getSession().getApplicationBufferSize());
-            deferDefragmentApp(); // defragment to try to make more space
+            int appBufferRequired = engine.getSession().getApplicationBufferSize();
+            if (appBufferRequired > plainBufferForApp.capacity()) {
+                Logger.shouldNotHappen("the user buffer is too small to hold data, " +
+                    "expecting : " + appBufferRequired);
+            } else {
+                deferDefragmentApp(); // defragment to try to make more space
+            }
             // NOTE: if it's capacity is smaller than required, we can do nothing here
             return false;
         }

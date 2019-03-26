@@ -24,6 +24,7 @@ import java.util.LinkedList;
  * NOTE: storage/writableET is proxied to/from the plain buffer
  */
 public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer {
+    // this handler is for plain data buffer
     class ReadableHandler implements RingBufferETHandler {
         @Override
         public void readableET() {
@@ -33,6 +34,33 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
         @Override
         public void writableET() {
             triggerWritable(); // proxy the event
+        }
+    }
+
+    // this handler is for encrypted output buffer
+    class WritableHandler implements RingBufferETHandler {
+        @Override
+        public void readableET() {
+        }
+
+        @Override
+        public void writableET() {
+            if (plainBufferForApp.used() > 0 && !isOperating()) {
+                assert Logger.lowLevelDebug("calling generalWrap from writableET");
+                // only trigger when there are data inside the plain buffer
+                // because this should not happen when handshaking
+                //
+                // when handshaking: wrap will be called from Unwrap
+                // and buffer size is definitely enough
+
+                // so we should check before do read wrapping
+                generalWrap();
+            }
+        }
+
+        @Override
+        public boolean flushAware() {
+            return true;
         }
     }
 
@@ -51,6 +79,7 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
         // use heap buffer for output
         // it will interact heavily with java code
         this.encryptedBufferForOutput = RingBuffer.allocate(outputCap);
+        this.encryptedBufferForOutput.addHandler(new WritableHandler());
 
         // we add a handler to the plain buffer
         plainBufferForApp.addHandler(readableHandler);
@@ -76,6 +105,8 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
     }
 
     void generalWrap() {
+        int plainBeforeWrap = plainBufferForApp.used();
+        int plainAfterWrap; // we be set after the wrap done
         boolean outBufWasEmpty = encryptedBufferForOutput.used() == 0;
         setOperating(true);
         try {
@@ -100,6 +131,8 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
             // it's memory operation, should not happen
             Logger.shouldNotHappen("got exception when wrapping", e);
         } finally {
+            plainAfterWrap = plainBufferForApp.used();
+
             // then we check the buffer and try to invoke ETHandler
             boolean outBufNowNotEmpty = encryptedBufferForOutput.used() > 0;
             if (outBufWasEmpty && outBufNowNotEmpty) {
@@ -109,13 +142,37 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
         }
 
         // check deferer
-        if (deferer.isEmpty())
-            return; // noting to run
-        assert deferer.size() == 1;
-        deferer.poll().run();
+        if (!deferer.isEmpty()) {
+            assert deferer.size() == 1;
+            deferer.poll().run();
+        }
+
+        boolean gotBytesConsumed = plainBeforeWrap != plainAfterWrap;
+        if (plainBufferForApp.used() > 0 && gotBytesConsumed) {
+            assert Logger.lowLevelDebug("still getting app data, run recursively");
+            generalWrap();
+        }
+        // otherwise the plain buffer is empty
+        // or no bytes consumed for now (maybe because the output buffer does not have enough space)
+        //
+        // for the first condition, new data will be wrapped when arrives
+        // for the second condition, when the output buffer is empty, data would be wrapped
     }
 
     private void deferGeneralWrap() {
+        // there are some differences between wrap ring buffer and unwrap ring buffer
+        // about whether to let (un)wrap/(un)wrapHandshake defer the (un)wrap process
+        //
+        // the unwrap ring buffer reads data from outside world and write to buffer inside app
+        // so when the outside world buffer is empty, it knows that there is nothing to do anymore
+        //
+        // however the wrap ring buffer may produce data by it self when handshaking
+        // and we cannot check whether handshake is done in `generalWrap`
+        // wo we let the wrapHandshake to do this for use
+        //
+        // for wrap() after handshake, we can tell whether to stop from the plain buffer
+        // so this method should not be used in wrap() function
+
         deferer.push(this::generalWrap);
     }
 
@@ -165,8 +222,18 @@ public class SSLWrapRingBuffer extends AbstractRingBuffer implements RingBuffer 
 
         // here: BUFFER_OVERFLOW
         assert status == SSLEngineResult.Status.BUFFER_OVERFLOW;
-        Logger.warn(LogType.SSL_ERROR, "BUFFER_OVERFLOW in wrap, " +
+        assert Logger.lowLevelDebug("BUFFER_OVERFLOW in wrap, " +
             "expecting " + engine.getSession().getPacketBufferSize());
+
+        if (result.bytesConsumed() == 0 && !encryptedBufferForOutput.canDefragment()) {
+            // nothing consumed and encrypted buffer cannot defragment
+            // which means buffers are busy and data should not be processed any more
+            //
+            // the process will resume when encrypted output buffer is empty
+            // see WritableHandler
+            return true;
+        }
+
         deferDefragment(); // try to make more space
         // NOTE: if it's capacity is smaller than required, we can do nothing here
         return false;

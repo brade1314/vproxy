@@ -1,5 +1,6 @@
 package net.cassite.vproxy.connection;
 
+import net.cassite.vproxy.selector.TimerEvent;
 import net.cassite.vproxy.util.Logger;
 import net.cassite.vproxy.util.RingBuffer;
 import net.cassite.vproxy.util.RingBufferETHandler;
@@ -66,6 +67,9 @@ public class Connection implements NetFlowRecorder {
             NetEventLoop eventLoop = _eventLoop;
             if (!closed && eventLoop != null) {
                 // the buffer is readable means the channel can write data
+                if (protocol == Protocol.TCP) {
+                    NetEventLoopUtils.resetCloseTimeout(_cctx);
+                }
                 assert Logger.lowLevelDebug("out buffer is readable, do WRITE for channel " + channel);
                 // let's directly write the data if possible
                 // we do not need lock here,
@@ -147,6 +151,9 @@ public class Connection implements NetFlowRecorder {
     public final Protocol protocol;
     private final boolean looksLikeAConnection; // this field determines outBufferETHandler's behavior
     BindServer.UDPConn _udpDummyConn; // should be removed when this connection is closed
+
+    TimerEvent closeTimeout; // the connection should be released after a few minutes if no data at all
+    long lastTimestamp;
 
     // statistics fields
     // the connection is handled in a single thread, so no need to synchronize
