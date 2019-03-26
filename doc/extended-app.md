@@ -52,6 +52,11 @@ listen 18686 auth alice:pasSw0rD,bob:PaSsw0Rd
 ### AppClass=WebSocksAgent
 
 An agent server run locally, which wraps websocks into socks5, so that other applications can use.
+```
+java -D+A:AppClass=WebSocksProxyAgent -jar vproxy-1.0.0-ALPHA-2.jar websocks-agent-example.conf
+curl --socks5 'socks5h://127.0.0.1:1080' 'google.com'
+```
+
 
 See [The Websocks Protocol](https://github.com/wkgcass/vproxy/blob/master/doc/websocks.md) for more info.
 

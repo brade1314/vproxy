@@ -30,7 +30,7 @@ java -D+A:AppClass=WebSocksProxyServer -jar vproxy.jar listen 18686 auth alice:p
 
 ## 可用的应用
 
-### AppClass=WebSocksProxyServer
+### AppClass=WebSocksProxyAgent
 
 一个代理服务器，即使在websocket网关后面也可以代理裸tcp流量。
 
