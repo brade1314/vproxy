@@ -9,9 +9,7 @@ import net.cassite.vproxy.connection.NetEventLoop;
 import net.cassite.vproxy.selector.SelectorEventLoop;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 
 // create an echo server, and create a proxy
 // client requests proxy, proxy requests echo server
@@ -27,14 +25,9 @@ public class ProxyEchoServer {
         // init config
         ProxyNetConfig config = new ProxyNetConfig()
             .setAcceptLoop(netEventLoop)
-            .setConnGen(() -> conn -> {
+            .setConnGen(conn -> {
                 // connect to localhost 19080
-                try {
-                    return new Connector(new InetSocketAddress("127.0.0.1", 19080),
-                        new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
-                } catch (UnknownHostException e) {
-                    return null;
-                }
+                return new Connector(new InetSocketAddress("127.0.0.1", 19080));
             })
             .setHandleLoopProvider(() -> netEventLoop) // use same event loop as the acceptor for demonstration
             .setServer(server)

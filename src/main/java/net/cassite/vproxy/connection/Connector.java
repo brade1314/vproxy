@@ -3,24 +3,17 @@ package net.cassite.vproxy.connection;
 import net.cassite.vproxy.util.RingBuffer;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
 public class Connector {
     public final InetSocketAddress remote;
-    public final InetSocketAddress local;
 
-    public Connector(InetSocketAddress remote, InetSocketAddress local) {
+    public Connector(InetSocketAddress remote) {
         this.remote = remote;
-        this.local = local;
     }
 
-    public Connector(InetSocketAddress remote, InetAddress local) {
-        this(remote, new InetSocketAddress(local, 0));
-    }
-
-    public ClientConnection connect(RingBuffer in, RingBuffer out) throws IOException {
-        ClientConnection conn = ClientConnection.create(remote, local, in, out);
+    public ClientConnection connect(ConnectionOpts opts, RingBuffer in, RingBuffer out) throws IOException {
+        ClientConnection conn = ClientConnection.create(remote, opts, in, out);
         conn.connector = this;
         return conn;
     }
@@ -41,6 +34,6 @@ public class Connector {
 
     @Override
     public String toString() {
-        return "Connector(remote(" + remote + "), local(" + local + "))";
+        return "Connector(" + remote + ")";
     }
 }

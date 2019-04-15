@@ -1,5 +1,6 @@
 package net.cassite.vproxy.component.auto;
 
+import net.cassite.vproxy.app.Config;
 import net.cassite.vproxy.component.app.TcpLB;
 import net.cassite.vproxy.component.exception.AlreadyExistException;
 import net.cassite.vproxy.component.exception.ClosedException;
@@ -30,7 +31,7 @@ public class AutoLB {
 
             ServerGroup grp = lb.backends.getServerGroups().get(0).group;
             try {
-                grp.add(svrName, new InetSocketAddress(node.address, node.port), config.bindInetAddress, 10);
+                grp.add(svrName, new InetSocketAddress(node.address, node.port), 10);
             } catch (AlreadyExistException e) {
                 Logger.shouldNotHappen("add server into group failed", e);
             }
@@ -93,8 +94,10 @@ public class AutoLB {
             tl = new TcpLB(lbName,
                 config.acceptorGroup, config.workerGroup,
                 new InetSocketAddress(config.bindInetAddress, port),
-                sgs, 16384, 16384, SecurityGroup.allowAll(), 0);
-        } catch (IOException | ClosedException | AlreadyExistException e) {
+                sgs,
+                Config.tcpTimeout,
+                16384, 16384, SecurityGroup.allowAll());
+        } catch (ClosedException | AlreadyExistException e) {
             Logger.shouldNotHappen("got exception when creating tcp lb", e);
             throw e;
         }

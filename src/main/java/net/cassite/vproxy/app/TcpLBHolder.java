@@ -27,13 +27,13 @@ public class TcpLBHolder {
                     EventLoopGroup workerEventLoopGroup,
                     InetSocketAddress bindAddress,
                     ServerGroups backends,
+                    int timeout,
                     int inBufferSize,
                     int outBufferSize,
-                    SecurityGroup securityGroup,
-                    int persist) throws AlreadyExistException, IOException, ClosedException {
+                    SecurityGroup securityGroup) throws AlreadyExistException, IOException, ClosedException {
         if (map.containsKey(alias))
             throw new AlreadyExistException();
-        TcpLB tcpLB = new TcpLB(alias, acceptorEventLoopGroup, workerEventLoopGroup, bindAddress, backends, inBufferSize, outBufferSize, securityGroup, persist);
+        TcpLB tcpLB = new TcpLB(alias, acceptorEventLoopGroup, workerEventLoopGroup, bindAddress, backends, timeout, inBufferSize, outBufferSize, securityGroup);
         map.put(alias, tcpLB);
         tcpLB.start();
     }

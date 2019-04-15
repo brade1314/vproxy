@@ -23,7 +23,6 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 public class Socks5Server extends TcpLB {
     // singleton in one Socks5Server object
@@ -64,7 +63,7 @@ public class Socks5Server extends TcpLB {
                 // search for a group with name same as the address:port
                 for (ServerGroups.ServerGroupHandle gh : serverGroups.getServerGroups()) {
                     if (gh.alias.equals(addrport)) { // matches
-                        providedCallback.accept(gh.group.next());
+                        providedCallback.accept(gh.group.next(accepted.remote));
                         return;
                     }
                 }
@@ -103,13 +102,13 @@ public class Socks5Server extends TcpLB {
     private final Socks5ServerConnectorProvider connectorProvider = new Socks5ServerConnectorProvider();
     public boolean allowNonBackend = false;
 
-    public Socks5Server(String alias, EventLoopGroup acceptorGroup, EventLoopGroup workerGroup, InetSocketAddress bindAddress, ServerGroups backends, int inBufferSize, int outBufferSize, SecurityGroup securityGroup) throws IOException, AlreadyExistException, ClosedException {
-        super(alias, acceptorGroup, workerGroup, bindAddress, backends, inBufferSize, outBufferSize, securityGroup, 0);
+    public Socks5Server(String alias, EventLoopGroup acceptorGroup, EventLoopGroup workerGroup, InetSocketAddress bindAddress, ServerGroups backends, int timeout, int inBufferSize, int outBufferSize, SecurityGroup securityGroup) throws IOException, AlreadyExistException, ClosedException {
+        super(alias, acceptorGroup, workerGroup, bindAddress, backends, timeout, inBufferSize, outBufferSize, securityGroup);
     }
 
     @Override
-    protected Supplier<ConnectorGen> provideConnectorGen() {
+    protected ConnectorGen provideConnectorGen() {
         // create a socks5 connector gen
-        return () -> connectorGen;
+        return connectorGen;
     }
 }

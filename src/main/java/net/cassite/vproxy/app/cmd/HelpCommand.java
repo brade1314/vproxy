@@ -16,9 +16,7 @@ public class HelpCommand {
         }
         StringBuilder sb = new StringBuilder(originStr);
         int len = totalCount - originStr.length();
-        for (int i = 0; i < len; ++i) {
-            sb.append(" ");
-        }
+        sb.append(" ".repeat(len));
         return sb.toString();
     }
 
@@ -32,9 +30,7 @@ public class HelpCommand {
                 sb.append("-");
             }
             sb.append("\n");
-            for (int i = 0; i < spaces; ++i) {
-                sb.append(" ");
-            }
+            sb.append(" ".repeat(spaces));
             int end = idx + maxLen;
             if (end > originStr.length()) {
                 end = originStr.length();
@@ -389,7 +385,6 @@ public class HelpCommand {
         servergroups("server-groups", "sgs", "server groups"),
         inbuffersize("in-buffer-size", null, "in buffer size"),
         outbuffersize("out-buffer-size", null, "out buffer size"),
-        persist("persist", null, "connector persist timeout"),
         securitygroup("security-group", "secg", "security group"),
         timeout("timeout", null, "health check timeout"),
         period("period", null, "health check period"),
@@ -397,7 +392,6 @@ public class HelpCommand {
         down("down", null, "health check down times"),
         method("method", "meth", "method to retrieve a server"),
         weight("weight", "w", "weight"),
-        ip("ip", "via", "ip address"),
         dft("default", null, "enum: allow or deny"),
         network("network", "net", "network: $network/$mask"),
         protocol("protocol", null, "enum: tcp or udp"),
@@ -418,8 +412,8 @@ public class HelpCommand {
     }
 
     public enum FlagMan {
-        noipv4("noipv4", null, "do not use ipv4 address. Use with address|ip|via"),
-        noipv6("noipv6", null, "do not use ipv6 address. Use with address|ip|via"),
+        noipv4("noipv4", null, "do not use ipv4 address. Use the flag with param: address"),
+        noipv6("noipv6", null, "do not use ipv6 address. Use the flag with param: address"),
         allownonbackend("allow-non-backend", null, "allow to access non backend endpoints"),
         denynonbackend("deny-non-backend", null, "only able to access backend endpoints"),
         ;
@@ -444,7 +438,6 @@ public class HelpCommand {
                     , new ResActParamMan(ParamMan.servergroups, "used as the backend servers")
                     , new ResActParamMan(ParamMan.inbuffersize, "input buffer size", "16384 (bytes)")
                     , new ResActParamMan(ParamMan.outbuffersize, "output buffer size", "16384 (bytes)")
-                    , new ResActParamMan(ParamMan.persist, "an integer representing the timeout (ms) of how long to persist a connector for a client ip", "0, means do not persist")
                     , new ResActParamMan(ParamMan.securitygroup, "specify a security group for the lb", "allow any")
                 ),
                 Collections.singletonList(
@@ -466,18 +459,17 @@ public class HelpCommand {
                 Collections.singletonList(
                     new Tuple<>(
                         "list-detail tcp-lb",
-                        "1) \"lb0 -> acceptor elg0 worker elg0 bind 127.0.0.1:18080 backends sgs0 in buffer size 16384 out buffer size 16384 persist 0 security-group secg0\""
+                        "1) \"lb0 -> acceptor elg0 worker elg0 bind 127.0.0.1:18080 backends sgs0 in buffer size 16384 out buffer size 16384 security-group secg0\""
                     )
                 ))
-            , new ResActMan(ActMan.update, "update persist, in-buffer-size or out-buffer-size of an lb",
+            , new ResActMan(ActMan.update, "update in-buffer-size or out-buffer-size of an lb",
                 Arrays.asList(
                     new ResActParamMan(ParamMan.inbuffersize, "input buffer size", "not changed")
                     , new ResActParamMan(ParamMan.outbuffersize, "output buffer size", "not changed")
-                    , new ResActParamMan(ParamMan.persist, "an integer representing the timeout (ms) of how long to persist a connector for a client ip", "not changed")
                 ),
                 Collections.singletonList(
                     new Tuple<>(
-                        "update tcp-lb lb0 persist 10000 in-buffer-size 32768 out-buffer-size 32768",
+                        "update tcp-lb lb0 in-buffer-size 32768 out-buffer-size 32768",
                         "\"OK\""
                     )
                 ))
@@ -621,7 +613,7 @@ public class HelpCommand {
                         new ResActParamMan(ParamMan.period, "do check every `${period}` milliseconds"),
                         new ResActParamMan(ParamMan.up, "set server status to UP after succeeded for `${up}` times"),
                         new ResActParamMan(ParamMan.down, "set server status to DOWN after failed for `${down}` times"),
-                        new ResActParamMan(ParamMan.method, "loadbalancing algorithm, `wrr` or `wlc`", "wrr"),
+                        new ResActParamMan(ParamMan.method, "loadbalancing algorithm, you can choose `wrr`, `wlc`, `source`", "wrr"),
                         new ResActParamMan(ParamMan.eventloopgroup, "choose a event-loop-group for the server group. health check operations will be performed on the event loop group")
                     ),
                     Collections.singletonList(
@@ -674,7 +666,7 @@ public class HelpCommand {
                         new ResActParamMan(ParamMan.period, "do check every `${period}` milliseconds", "not changed"),
                         new ResActParamMan(ParamMan.up, "set server status to UP after succeeded for `${up}` times", "not changed"),
                         new ResActParamMan(ParamMan.down, "set server status to DOWN after failed for `${down}` times", "not changed"),
-                        new ResActParamMan(ParamMan.method, "loadbalancing algorithm, `wrr` or `wlc`", "not changed"),
+                        new ResActParamMan(ParamMan.method, "loadbalancing algorithm, you can choose `wrr`, `wlc`, `source`", "not changed"),
                         new ResActParamMan(ParamMan.weight, "the weight of group in this server-groups resource", "not changed")
                     ),
                     Arrays.asList(
@@ -741,15 +733,14 @@ public class HelpCommand {
             )),
         server("server", "svr", "a remote endpoint",
             Arrays.asList(
-                new ResActMan(ActMan.addto, "specify name, remote ip:port, local request ip, weight, and attach the server into the server group",
+                new ResActMan(ActMan.addto, "specify name, remote ip:port, weight, and attach the server into the server group",
                     Arrays.asList(
                         new ResActParamMan(ParamMan.address, "remote address, ip:port"),
-                        new ResActParamMan(ParamMan.ip, "local request ip address"),
-                        new ResActParamMan(ParamMan.weight, "weight of the server, which will be used by wrr and wlc algorithm")
+                        new ResActParamMan(ParamMan.weight, "weight of the server, which will be used by wrr, wlc and source algorithm")
                     ),
                     Collections.singletonList(
                         new Tuple<>(
-                            "add server svr0 to server-group sg0 address 127.0.0.1:6379 via 127.0.0.1 weight 10",
+                            "add server svr0 to server-group sg0 address 127.0.0.1:6379 weight 10",
                             "\"OK\""
                         )
                     )),
@@ -766,7 +757,7 @@ public class HelpCommand {
                     Collections.singletonList(
                         new Tuple<>(
                             "list-detail server in server-group sg0",
-                            "1) \"svr0 -> connect to 127.0.0.1:6379 via 127.0.0.1 weight 10 currently DOWN\""
+                            "1) \"svr0 -> connect to 127.0.0.1:6379 weight 10 currently DOWN\""
                         )
                     )),
                 new ResActMan(ActMan.update, "change weight of the server",
@@ -863,35 +854,6 @@ public class HelpCommand {
                     Collections.singletonList(
                         new Tuple<>(
                             "remove security-group-rule secgr0 from security-group secg0",
-                            "\"OK\""
-                        )
-                    ))
-            )),
-        persist("persist", null, "represents a persisted connector, which contains client source ip, which server to use and request server with which local ip",
-            Arrays.asList(
-                new ResActMan(ActMan.list, "count persisted connectors",
-                    Collections.emptyList(),
-                    Collections.singletonList(
-                        new Tuple<>(
-                            "list persist in tl lb0",
-                            "(integer) 1"
-                        )
-                    )),
-                new ResActMan(ActMan.listdetail, "retrieve detailed info of all persisted connectors",
-                    Collections.emptyList(),
-                    Collections.singletonList(
-                        new Tuple<>(
-                            "list-detail persist in tl lb0",
-                            "1) 1) \"client: 127.0.0.1\"\n" +
-                                "   2) \"server: 127.0.0.1:16666\"\n" +
-                                "   3) \"   via: 127.0.0.1:0\""
-                        )
-                    )),
-                new ResActMan(ActMan.forceremove, "specify the source (client) address string and remove the persist record",
-                    Collections.emptyList(),
-                    Collections.singletonList(
-                        new Tuple<>(
-                            "force-remove persist 127.0.0.1 from tcp-lb lb0",
                             "\"OK\""
                         )
                     ))

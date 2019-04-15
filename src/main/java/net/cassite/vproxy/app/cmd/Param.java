@@ -8,7 +8,6 @@ public enum Param {
     elg("event-loop-group"),
     aelg("acceptor-elg"),
     addr("address"),
-    ip("via"),
     sgs("server-groups"),
     inbuffersize("in-buffer-size"),
     outbuffersize("out-buffer-size"),
@@ -19,7 +18,6 @@ public enum Param {
     net("network"),
     protocol("protocol"),
     portrange("port-range"),
-    persist("persist"),
 
     service("service"),
     zone("zone"),

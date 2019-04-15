@@ -1,12 +1,14 @@
 package net.cassite.vproxy.discovery;
 
-import net.cassite.vproxy.app.Config;
 import net.cassite.vproxy.component.elgroup.EventLoopGroup;
 import net.cassite.vproxy.component.exception.*;
 import net.cassite.vproxy.component.svrgroup.Method;
 import net.cassite.vproxy.component.svrgroup.ServerGroup;
 import net.cassite.vproxy.component.svrgroup.ServerListener;
-import net.cassite.vproxy.connection.*;
+import net.cassite.vproxy.connection.BindServer;
+import net.cassite.vproxy.connection.ConnectionHandler;
+import net.cassite.vproxy.connection.ConnectionHandlerContext;
+import net.cassite.vproxy.connection.NetEventLoop;
 import net.cassite.vproxy.discovery.protocol.NodeDataMsg;
 import net.cassite.vproxy.discovery.protocol.NodeExistenceMsg;
 import net.cassite.vproxy.protocol.ProtocolServerConfig;
@@ -23,8 +25,6 @@ import net.cassite.vproxy.util.*;
 import java.io.IOException;
 import java.net.*;
 import java.nio.ByteBuffer;
-import java.nio.channels.DatagramChannel;
-import java.nio.channels.NetworkChannel;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
@@ -54,41 +54,6 @@ import java.util.stream.Collectors;
  * 11. when receiving the packet, they will remove the left node
  */
 public class Discovery {
-    class NodeExistenceServerHandler implements ServerHandler {
-        @Override
-        public void acceptFail(ServerHandlerContext ctx, IOException err) {
-            // will not fire for udp
-        }
-
-        @Override
-        public void connection(ServerHandlerContext ctx, Connection connection) {
-            // ignore, will fire readable later
-        }
-
-        @Override
-        public Tuple<RingBuffer, RingBuffer> getIOBuffers(NetworkChannel channel) {
-            // the buffer should be large enough
-            // and we use heap memory because it usually only used once then destroyed
-            return new Tuple<>(RingBuffer.allocate(2048), RingBuffer.allocate(2048));
-        }
-
-        @Override
-        public void removed(ServerHandlerContext ctx) {
-            ctx.server.close();
-        }
-
-        @Override
-        public void exception(ServerHandlerContext ctx, IOException err) {
-            // only log, we do not care
-            assert Logger.lowLevelDebug("got exception for udp server " + ctx.server + " " + err);
-        }
-
-        @Override
-        public ConnectionHandler udpHandler(ServerHandlerContext ctx, Connection conn) {
-            return nodeExistenceConnectionHandler;
-        }
-    }
-
     class NodeExistenceConnectionHandler implements ConnectionHandler {
         private void clearBuffer(RingBuffer rb) {
             if (rb.used() <= 0)
@@ -393,9 +358,7 @@ public class Discovery {
     private final EventLoopGroup eventLoopGroup;
     private final SelectorEventLoop blockingUDPSendThread;
     private final SelectorEventLoop blockingUDPRecvThread;
-    private final DatagramChannel udpSock;
     private final DatagramSocket udpBlockingSock;
-    private final BindServer udpServer;
     private final DatagramSocket udpBlockingServer;
     private final BindServer tcpServer;
 
@@ -403,7 +366,6 @@ public class Discovery {
     private boolean isInInterval = false; // is already into the interval
     private boolean closed = false;
 
-    private final NodeExistenceServerHandler nodeExistenceServerHandler = new NodeExistenceServerHandler();
     private final NodeExistenceConnectionHandler nodeExistenceConnectionHandler = new NodeExistenceConnectionHandler();
     private final NodeDataApplication nodeDataApplication = new NodeDataApplication();
 
@@ -419,19 +381,15 @@ public class Discovery {
         ServerGroup hcGroup = null;
         ByteBuffer searchBuffer = null;
         ByteBuffer informBuffer = null;
-        DatagramChannel udpSock = null;
         DatagramSocket udpBlockingSock = null;
-        BindServer udpServer = null;
         DatagramSocket udpBlockingServer = null;
         BindServer tcpServer = null;
 
         try {
             blockingUDPSendThread = SelectorEventLoop.open();
-            if (!Config.useDatagramChannel)
-                blockingUDPSendThread.loop(r -> new Thread(r, "BlockingUDPSendThread:" + nodeName));
+            blockingUDPSendThread.loop(r -> new Thread(r, "BlockingUDPSendThread:" + nodeName));
             blockingUDPRecvThread = SelectorEventLoop.open();
-            if (!Config.useDatagramChannel)
-                blockingUDPRecvThread.loop(r -> new Thread(r, "BlockingUDPRecvThread:" + nodeName));
+            blockingUDPRecvThread.loop(r -> new Thread(r, "BlockingUDPRecvThread:" + nodeName));
             eventLoopGroup = new EventLoopGroup("EventLoopGroup:" + nodeName);
             try {
                 eventLoopGroup.add("EventLoop:" + nodeName);
@@ -454,21 +412,15 @@ public class Discovery {
             }
             hcGroup.addServerListener(new HealthListener());
 
-            searchBuffer = Config.useDatagramChannel
-                ? ByteBuffer.allocateDirect(nodeName.getBytes().length + 256/*make it large enough*/)
-                : ByteBuffer.allocate(/*--*/nodeName.getBytes().length + 256/*make it large enough*/);
-            informBuffer = Config.useDatagramChannel
-                ? ByteBuffer.allocateDirect(nodeName.getBytes().length + 256/*make it large enough*/)
-                : ByteBuffer.allocate(/*--*/nodeName.getBytes().length + 256/*make it large enough*/);
+            searchBuffer = ByteBuffer.allocate(nodeName.getBytes().length + 256/*make it large enough*/);
+            informBuffer = ByteBuffer.allocate(nodeName.getBytes().length + 256/*make it large enough*/);
             Node n = new Node(nodeName, config.bindAddress, config.udpPort, config.tcpPort);
             n.healthy = true;
             this.localNode = n;
             String groupServerName = buildGroupServerName(nodeName, config.bindAddress, config.tcpPort);
             nodes.put(groupServerName, new NodeDetach(groupServerName, n, true));
 
-            udpSock = startUdpSock();
             udpBlockingSock = startUdpBlockingSock();
-            udpServer = startUdpServer();
             udpBlockingServer = createUdpBlockingServer();
             tcpServer = startTcpServer();
         } catch (Throwable t) {
@@ -485,12 +437,8 @@ public class Discovery {
                 Utils.clean(searchBuffer);
             if (informBuffer != null)
                 Utils.clean(informBuffer);
-            if (udpSock != null)
-                udpSock.close();
             if (udpBlockingSock != null)
                 udpBlockingSock.close();
-            if (udpServer != null)
-                udpServer.close();
             if (udpBlockingServer != null)
                 udpBlockingServer.close();
             //noinspection ConstantConditions
@@ -512,9 +460,7 @@ public class Discovery {
         this.hcGroup = hcGroup;
         this.searchBuffer = searchBuffer;
         this.informBuffer = informBuffer;
-        this.udpSock = udpSock;
         this.udpBlockingSock = udpBlockingSock;
-        this.udpServer = udpServer;
         this.udpBlockingServer = udpBlockingServer;
         this.tcpServer = tcpServer;
 
@@ -588,29 +534,12 @@ public class Discovery {
     }
 
     private DatagramSocket startUdpBlockingSock() throws IOException {
-        if (Config.useDatagramChannel)
-            return null;
         DatagramSocket sock = new DatagramSocket(null);
-        // sock.setReuseAddress(true); graalvm doesn't support
         sock.bind(new InetSocketAddress(config.bindInetAddress, config.udpSockPort));
         return sock;
     }
 
-    private DatagramChannel startUdpSock() throws IOException {
-        if (!Config.useDatagramChannel)
-            return null;
-        DatagramChannel chnl = DatagramChannel.open((config.bindInetAddress instanceof Inet6Address)
-            ? StandardProtocolFamily.INET6
-            : StandardProtocolFamily.INET);
-        chnl.configureBlocking(false);
-        chnl.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-        chnl.bind(new InetSocketAddress(config.bindInetAddress, config.udpSockPort));
-        return chnl;
-    }
-
     private DatagramSocket createUdpBlockingServer() throws IOException {
-        if (Config.useDatagramChannel)
-            return null;
         DatagramSocket server = new DatagramSocket(null);
         // server.setReuseAddress(true); grralvm doesn't support
         server.bind(new InetSocketAddress(config.bindInetAddress, config.udpPort));
@@ -618,8 +547,6 @@ public class Discovery {
     }
 
     private void startUdpBlockingServer() {
-        if (Config.useDatagramChannel)
-            return;
         blockingUDPRecvThread.runOnLoop(() -> {
             byte[] buf = new byte[16384];
             DatagramPacket pkt = new DatagramPacket(buf, 0, buf.length);
@@ -636,14 +563,6 @@ public class Discovery {
                 nodeExistenceConnectionHandler.readable(pkt.getAddress(), buf, pkt.getLength());
             }
         });
-    }
-
-    private BindServer startUdpServer() throws IOException {
-        if (!Config.useDatagramChannel)
-            return null;
-        BindServer udp = BindServer.createUDP(new InetSocketAddress(config.bindInetAddress, config.udpPort));
-        loop.addServer(udp, null, nodeExistenceServerHandler);
-        return udp;
     }
 
     private BindServer startTcpServer() throws IOException {
@@ -668,7 +587,7 @@ public class Discovery {
         if (!nodes.containsKey(groupServerName)) {
             Logger.info(LogType.DISCOVERY_EVENT, "recording new node: " + node);
             try {
-                hcGroup.add(groupServerName, node.address, new InetSocketAddress(node.address, node.tcpPort), config.bindInetAddress, 10);
+                hcGroup.add(groupServerName, node.address, new InetSocketAddress(node.address, node.tcpPort), 10);
             } catch (AlreadyExistException e) {
                 Logger.shouldNotHappen("the node already exist in hcGroup " + groupServerName);
             }
@@ -698,37 +617,27 @@ public class Discovery {
         Logger.warn(LogType.DISCOVERY_EVENT, "node " + groupServerName + " is REMOVED");
     }
 
-    private void sendBuffer(ByteBuffer buffer, InetSocketAddress sockAddr) throws IOException {
+    private void sendBuffer(ByteBuffer buffer, InetSocketAddress sockAddr) {
         int pos = buffer.position();
         int lim = buffer.limit();
-        int res;
-        if (Config.useDatagramChannel) {
-            res = udpSock.send(buffer, sockAddr);
-        } else {
-            res = lim; // mock the res, we don't care about the result anyway
-            byte[] bytes = buffer.array();
-            DatagramPacket pkt = new DatagramPacket(bytes, lim);
-            pkt.setAddress(sockAddr.getAddress());
-            pkt.setPort(sockAddr.getPort());
-            blockingUDPSendThread.runOnLoop(() -> {
-                assert Logger.lowLevelDebug("run blocking udp sock to send data");
-                try {
-                    udpBlockingSock.send(pkt);
-                } catch (IOException e) {
-                    Logger.shouldNotHappen("send udp pkt failed", e);
-                }
-            });
-        }
-        assert Logger.lowLevelDebug("udpSock.send wrote " + res + " bytes");
+        byte[] bytes = buffer.array();
+        DatagramPacket pkt = new DatagramPacket(bytes, lim);
+        pkt.setAddress(sockAddr.getAddress());
+        pkt.setPort(sockAddr.getPort());
+        blockingUDPSendThread.runOnLoop(() -> {
+            assert Logger.lowLevelDebug("run blocking udp sock to send data");
+            try {
+                udpBlockingSock.send(pkt);
+            } catch (IOException e) {
+                Logger.shouldNotHappen("send udp pkt failed", e);
+            }
+        });
+        assert Logger.lowLevelDebug("udpSock.send wrote " + lim + " bytes");
         buffer.position(pos).limit(lim);
     }
 
     private void informNode(Node node) {
-        try {
-            sendBuffer(informBuffer, new InetSocketAddress(node.inetAddress, node.udpPort));
-        } catch (IOException e) {
-            assert Logger.lowLevelDebug("send inform message got error " + e);
-        }
+        sendBuffer(informBuffer, new InetSocketAddress(node.inetAddress, node.udpPort));
     }
 
     private void startSearch() {
@@ -749,11 +658,7 @@ public class Discovery {
 
         InetSocketAddress sockAddr = nextSearch();
         if (sockAddr != null) {
-            try {
-                sendBuffer(searchBuffer, sockAddr);
-            } catch (IOException e) {
-                assert Logger.lowLevelDebug("send search message got error " + e);
-            }
+            sendBuffer(searchBuffer, sockAddr);
         }
 
         int delay = nodes.size() == 1 /*1 means the node itself*/
@@ -815,7 +720,7 @@ public class Discovery {
     }
 
     private void requestForNodes(Node target) {
-        RESPClientUtils.oneReq(loop, new InetSocketAddress(target.inetAddress, target.tcpPort), config.bindInetAddress,
+        RESPClientUtils.oneReq(loop, new InetSocketAddress(target.inetAddress, target.tcpPort),
             getNodeDataToSend(), 3000, new Callback<Object, IOException>() {
                 @Override
                 protected void onSucceeded(Object value) {
@@ -946,11 +851,7 @@ public class Discovery {
         closed = true;
 
         // close the udp server to stop receiving packets
-        if (Config.useDatagramChannel) {
-            udpServer.close();
-        } else {
-            udpBlockingServer.close();
-        }
+        udpBlockingServer.close();
         // send `leave` message to all nodes
         Object[] messageToSend = {
             1 /*version*/,
@@ -961,10 +862,7 @@ public class Discovery {
             "",
         };
         byte[] bytesToSend = Serializer.from(messageToSend);
-        ByteBuffer byteBuffer =
-            Config.useDatagramChannel
-                ? ByteBuffer.allocateDirect(bytesToSend.length)
-                : ByteBuffer.allocate(bytesToSend.length);
+        ByteBuffer byteBuffer = ByteBuffer.allocate(bytesToSend.length);
         byteBuffer.put(bytesToSend);
         byteBuffer.flip();
         leave(byteBuffer, nodes.values().iterator(), new Callback<Void, NoException>() {
@@ -999,12 +897,7 @@ public class Discovery {
             leave(leaveMsg, nodes, cb);
             return;
         }
-        try {
-            sendBuffer(leaveMsg, new InetSocketAddress(n.node.address, n.node.udpPort));
-        } catch (IOException e) {
-            // ignore error
-            assert Logger.lowLevelDebug("udp sock send leave message failed " + e);
-        }
+        sendBuffer(leaveMsg, new InetSocketAddress(n.node.address, n.node.udpPort));
         loop.getSelectorEventLoop().delay(config.timeoutConfig.ppsLimitWhenNotJoined, () -> leave(leaveMsg, nodes, cb));
     }
 
@@ -1016,16 +909,7 @@ public class Discovery {
             Logger.shouldNotHappen("removing event loop failed", e);
             // we ignore the error because it's closing
         }
-        try {
-            if (Config.useDatagramChannel) {
-                udpSock.close();
-            } else {
-                udpBlockingSock.close();
-            }
-        } catch (IOException e) {
-            // ignore, we can do nothing about it
-            Logger.error(LogType.UNEXPECTED, "closing the udpSock failed", e);
-        }
+        udpBlockingSock.close();
 
         // then release the buffers
         Utils.clean(searchBuffer);

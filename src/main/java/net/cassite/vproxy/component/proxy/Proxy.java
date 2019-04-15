@@ -16,21 +16,6 @@ import java.util.Collection;
  * the session operations will always be handled in the same event loop
  */
 public class Proxy {
-    private static void utilValidate(ProxyNetConfig config) {
-        if (config.acceptLoop == null)
-            throw new IllegalArgumentException("no accept loop");
-        if (config.connGen == null)
-            throw new IllegalArgumentException("no connection generator");
-        if (config.handleLoopProvider == null)
-            throw new IllegalArgumentException("no handler loop provider");
-        if (config.server == null)
-            throw new IllegalArgumentException("no server");
-        if (config.inBufferSize <= 0)
-            throw new IllegalArgumentException("inBufferSize <= 0");
-        if (config.outBufferSize <= 0)
-            throw new IllegalArgumentException("outBufferSize <= 0");
-    }
-
     private static void utilCloseConnection(Connection connection) {
         assert Logger.lowLevelDebug("close connection " + connection);
         connection.close();
@@ -55,7 +40,7 @@ public class Proxy {
 
         @Override
         public void connection(ServerHandlerContext ctx, Connection connection) {
-            switch (config.connGen.get().type()) {
+            switch (config.connGen.type()) {
                 case handler:
                     handleHandler(connection);
                     break;
@@ -67,7 +52,7 @@ public class Proxy {
 
         private void handleDirect(Connection connection) {
             // make connection to another end point
-            Connector connector = config.connGen.get().genConnector(connection);
+            Connector connector = config.connGen.genConnector(connection);
             handleDirect(connection, connector);
         }
 
@@ -85,7 +70,9 @@ public class Proxy {
 
             ClientConnection clientConnection;
             try {
-                clientConnection = connector.connect(/*switch the two buffers to make a PROXY*/connection.getOutBuffer(), connection.getInBuffer());
+                clientConnection = connector.connect(
+                    new ConnectionOpts().setTimeout(config.timeout),
+                    /*switch the two buffers to make a PROXY*/connection.getOutBuffer(), connection.getInBuffer());
             } catch (IOException e) {
                 Logger.fatal(LogType.CONN_ERROR, "make passive connection failed, maybe provided endpoint info is invalid", e);
                 // it should not happen if user provided endpoint is valid
@@ -179,7 +166,7 @@ public class Proxy {
         @SuppressWarnings(/*ignore generics here*/"unchecked")
         private void handleHandler(Connection connection) {
             // retrieve the handler
-            ProtocolHandler pHandler = config.connGen.get().handler();
+            ProtocolHandler pHandler = config.connGen.handler();
             // retrieve an event loop provided by user code
             // the net flow will be handled here
             NetEventLoop loop = config.handleLoopProvider.get();
@@ -230,6 +217,11 @@ public class Proxy {
         @Override
         public void removed(ServerHandlerContext ctx) {
             handler.serverRemoved(ctx.server);
+        }
+
+        @Override
+        public ConnectionOpts connectionOpts() {
+            return new ConnectionOpts().setTimeout(config.timeout);
         }
     }
 
@@ -373,7 +365,7 @@ public class Proxy {
         }
     }
 
-    private final ProxyNetConfig config;
+    public final ProxyNetConfig config;
     private final ProxyEventHandler handler;
     private final ConcurrentHashSet<Session> sessions = new ConcurrentHashSet<>();
 
@@ -383,7 +375,6 @@ public class Proxy {
     }
 
     public void handle() throws IOException {
-        utilValidate(config);
         config.acceptLoop.addServer(config.server, null, new SessionServerHandler());
     }
 

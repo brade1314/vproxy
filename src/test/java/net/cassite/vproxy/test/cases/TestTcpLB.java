@@ -1,5 +1,6 @@
 package net.cassite.vproxy.test.cases;
 
+import net.cassite.vproxy.app.Config;
 import net.cassite.vproxy.component.app.TcpLB;
 import net.cassite.vproxy.component.check.HealthCheckConfig;
 import net.cassite.vproxy.component.elgroup.EventLoopGroup;
@@ -82,26 +83,26 @@ public class TestTcpLB {
         secg0 = new SecurityGroup("secg0", true);
         lb0 = new TcpLB("lb0", elg0, elg0,
             new InetSocketAddress("127.0.0.1", lbPort), sgs0,
-            16384, 16384, secg0, 0);
+            Config.tcpTimeout, 16384, 16384, secg0);
         lb0.start();
 
         sg0 = new ServerGroup("sg0", elg0, new HealthCheckConfig(400, /* disable health check */24 * 60 * 60 * 1000, 2, 3), Method.wrr);
-        sg0.add("svr0", new InetSocketAddress("127.0.0.1", 19080), InetAddress.getByName("127.0.0.1"), 10);
-        sg0.add("svr1", new InetSocketAddress("127.0.0.1", 19081), InetAddress.getByName("127.0.0.1"), 10);
+        sg0.add("svr0", new InetSocketAddress("127.0.0.1", 19080), 10);
+        sg0.add("svr1", new InetSocketAddress("127.0.0.1", 19081), 10);
         // manually set to healthy
         for (ServerGroup.ServerHandle h : sg0.getServerHandles()) {
             h.healthy = true;
         }
 
         sg1 = new ServerGroup("sg1", elg0, new HealthCheckConfig(400, /* disable health check */24 * 60 * 60 * 1000, 2, 3), Method.wrr);
-        sg1.add("svr2", new InetSocketAddress("127.0.0.1", 19082), InetAddress.getByName("0.0.0.0") /*here we bind all, see test: replaceIp()*/, 10);
+        sg1.add("svr2", new InetSocketAddress("127.0.0.1", 19082), 10);
         // manually set to healthy
         for (ServerGroup.ServerHandle h : sg1.getServerHandles()) {
             h.healthy = true;
         }
 
         sgEcho = new ServerGroup("sgEcho", elg0, new HealthCheckConfig(400, 1000, 1, 3), Method.wrr);
-        sgEcho.add("echo", new InetSocketAddress("127.0.0.1", 20080), InetAddress.getByName("127.0.0.1"), 10);
+        sgEcho.add("echo", new InetSocketAddress("127.0.0.1", 20080), 10);
 
         loop = SelectorEventLoop.open();
 
@@ -204,7 +205,7 @@ public class TestTcpLB {
             client.close();
         }
 
-        sg0.add("svr1", new InetSocketAddress("127.0.0.1", 19081), InetAddress.getByName("127.0.0.1"), 5);
+        sg0.add("svr1", new InetSocketAddress("127.0.0.1", 19081), 5);
         sg0.getServerHandles().stream().filter(s -> s.alias.equals("svr1")).findFirst().get().healthy = true;
 
         int zero = 0;
@@ -379,91 +380,27 @@ public class TestTcpLB {
     }
 
     @Test
-    public void proxyPersist() throws Exception {
+    public void proxySource() throws Exception {
+        // all requests should be sent to the same backend
+
+        // usually we do not use "source" proxy with multiple sg
+        // so in the test case, we only add one
         sgs0.add(sg0, 10);
-        // persists the connectors
-        lb0.persistTimeout = 2000; // set to 2 seconds
+        sg0.setMethod(Method.source);
 
-        sg0.setMethod(Method.wlc); // set method to wlc to make the test more clear
-        // because if svr0 has 10 conns but svr1 has 0
-        // with wlc, the client is definitely sending request to svr1
-        // but if it's persisted, it will only request the persisted server
-        ServerGroup.ServerHandle h = sg0.getServerHandles().stream().filter(s -> s.alias.equals("svr1")).findFirst().get();
-        // let's first set the server to DOWN to prevent being connected
-        h.healthy = false;
-
-        Client client = new Client(lbPort);
-        client.connect();
-        clients.add(client);
-        String recv = client.sendAndRecv("anything", 1);
-        assertEquals("it's 0 because svr1 is DOWN", "0", recv);
-
-        // the persist record should exist
-        assertEquals("should be one persist record", 1, lb0.persistMap.size());
-
-        // then set svr1 to UP
-        h.healthy = true;
-
-        for (int i = 0; i < 9/*total 10 connections*/; ++i) {
-            client = new Client(lbPort);
-            client.connect();
-            clients.add(client);
-            recv = client.sendAndRecv("anything", 1);
-            assertEquals("it's 0 because it's persisted", "0", recv);
-        }
-
-        // the persist record should not changed
-        assertEquals("should be one persist record", 1, lb0.persistMap.size());
-        InetAddress addr = lb0.persistMap.keySet().stream().findFirst().get();
-        assertEquals("the persisted key should be requester's ip", "127.0.0.1", Utils.ipStr(addr.getAddress()));
-
-        // let's remove the persist record
-        lb0.persistMap.get(addr).remove();
-        assertEquals("there should be no persist record now", 0, lb0.persistMap.size());
-
-        // and connect again
-        client = new Client(lbPort);
-        client.connect();
-        clients.add(client);
-        recv = client.sendAndRecv("anything", 1);
-        assertEquals("it's 1 because svr0 has 10 connections but svr1 has 0", "1", recv);
-        // let's connect 5 times
-        for (int i = 0; i < 9/*total 10 connections*/; ++i) {
-            client = new Client(lbPort);
-            client.connect();
-            clients.add(client);
-            recv = client.sendAndRecv("anything", 1);
-            assertEquals("it's 1 because it's persisted", "1", recv);
-        }
-        // this time, persist record should be pointed to svr1
-        assertEquals("should be one persist record", 1, lb0.persistMap.size());
-        // we do not check this time
-        // we are sure it's ok since it does exactly the same thing but change the target to svr1
-
-        // stop persist
-        lb0.persistTimeout = 0;
-        Thread.sleep(2500); // the timeout is 2000, so we sleep for 2500 to make sure it's definitely timed-out
-        // timed-out
-        assertEquals("there should be no persist record now", 0, lb0.persistMap.size());
-
-        // the connections should spread on each server
-        int zero = 0;
-        int one = 0;
-
+        // make connections
+        String resp = null;
         for (int i = 0; i < 100; ++i) {
-            client = new Client(lbPort);
+            Client client = new Client(lbPort);
             client.connect();
             clients.add(client);
-            recv = client.sendAndRecv("anything", 1);
-            assertTrue("response should be 0 or 1", recv.equals("0") || recv.equals("1"));
-            if (recv.equals("0")) {
-                ++zero;
+            String recv = client.sendAndRecv("anything", 1);
+            if (resp == null) {
+                resp = recv;
             } else {
-                ++one;
+                assertEquals("connections should be sent to the same backend because we are using source", "0", recv);
             }
         }
-        assertTrue("weight same, so zero count and one count should be the same",
-            zero - one > -2 && zero - one < 2); // we allow +-1
     }
 
     @Test
@@ -577,7 +514,7 @@ public class TestTcpLB {
         // let's get some resources that will not change
         ServerGroup.ServerHandle svr0 = sg0.getServerHandles().stream().filter(s -> s.alias.equals("svr0")).findFirst().get();
         ServerGroup.ServerHandle svr1 = sg0.getServerHandles().stream().filter(s -> s.alias.equals("svr1")).findFirst().get();
-        BindServer server = lb0.server;
+        BindServer server = lb0.servers.keySet().stream().findFirst().get();
 
         assertEquals("the server not connected", 0, server.getHistoryAcceptedConnectionCount());
         assertEquals("the server not connected", 0, server.getFromRemoteBytes());
@@ -594,6 +531,7 @@ public class TestTcpLB {
         String id1 = client1.sendAndRecv("client1msg000"/*13*/, 1);
         // send again to make a difference about outBytes between svr0 and svr1
         client1.sendAndRecv("client1msg001"/*13*/, 1);
+        Thread.sleep(10);
 
         assertEquals("the server is connected once", 1, server.getHistoryAcceptedConnectionCount());
         assertEquals("sent 26 bytes and received 2 bytes", 26, server.getFromRemoteBytes());
@@ -610,6 +548,7 @@ public class TestTcpLB {
         client2.connect();
         clients.add(client2);
         String id2 = client2.sendAndRecv("client2msg0"/*11*/, 1);
+        Thread.sleep(10);
 
         assertEquals("the server is connected twice", 2, server.getHistoryAcceptedConnectionCount());
         assertEquals("sent 11 bytes and received 1 byte", 37, server.getFromRemoteBytes());
@@ -704,7 +643,7 @@ public class TestTcpLB {
         // start another lb
         TcpLB lb1 = new TcpLB("lb1", elg0, elg0,
             new InetSocketAddress("127.0.0.1", lbPort + 1), sgs0,
-            16384, 16384, secg0, 0);
+            Config.tcpTimeout, 16384, 16384, secg0);
         lb1.start();
 
         // deny lbPort

@@ -14,10 +14,10 @@ import net.cassite.vproxy.socks.Socks5ConnectorProvider;
 import net.cassite.vproxy.util.*;
 import net.cassite.vproxy.util.ringbuffer.SSLUtils;
 
+import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.*;
 import java.util.function.Consumer;
 
@@ -84,7 +84,7 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
 
         @Override
         public ClientConnection provide(NetEventLoop loop) {
-            SvrHandleConnector connector = servers.get(alias).next();
+            SvrHandleConnector connector = servers.get(alias).next(null/*we ignore the source because it's wrr*/);
             if (connector == null) {
                 assert Logger.lowLevelDebug("no available remote server connector for now");
                 return null;
@@ -95,7 +95,9 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
                 if (useSSL) {
                     conn = CommonProcess.makeSSLConnection(connector);
                 } else {
-                    conn = connector.connect(RingBuffer.allocateDirect(16384), RingBuffer.allocateDirect(16384));
+                    conn = connector.connect(
+                        WebSocksUtils.getConnectionOpts(),
+                        RingBuffer.allocateDirect(16384), RingBuffer.allocateDirect(16384));
                 }
             } catch (IOException e) {
                 Logger.error(LogType.CONN_ERROR, "make websocks connection for the pool failed", e);
@@ -444,16 +446,8 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
 
             // add respond to the proxy lib
 
-            InetAddress local;
-            try {
-                local = InetAddress.getByName("0.0.0.0");
-            } catch (UnknownHostException e) {
-                Logger.shouldNotHappen("getByName 0.0.0.0 failed", e);
-                utilAlertFail(ctx);
-                return;
-            }
             providedCallback.accept(new AlreadyConnectedConnector(
-                ctx.connection.remote, local, (ClientConnection) ctx.connection, ctx.eventLoop
+                ctx.connection.remote, (ClientConnection) ctx.connection, ctx.eventLoop
             ));
 
             // every thing is done now
@@ -489,12 +483,23 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
 
         static ClientConnection makeSSLConnection(SelectorEventLoop loop, SvrHandleConnector connector) throws IOException {
             SSLEngine engine;
-            if (connector.getHostName() == null) {
+            String hostname = connector.getHostName();
+            if (hostname == null) {
                 engine = WebSocksUtils.getSslContext().createSSLEngine();
             } else {
-                engine = WebSocksUtils.getSslContext().createSSLEngine(connector.getHostName(), connector.remote.getPort());
+                engine = WebSocksUtils.getSslContext().createSSLEngine(hostname, connector.remote.getPort());
+            }
+            SSLParameters params = new SSLParameters();
+            {
+                params.setApplicationProtocols(new String[]{"http/1.1"});
+                if (hostname != null) {
+                    assert Logger.lowLevelDebug("using hostname " + hostname + " as sni");
+                    params.setServerNames(Collections.singletonList(new SNIHostName(hostname)));
+                }
             }
             engine.setUseClientMode(true);
+            engine.setSSLParameters(params);
+
             SSLUtils.SSLBufferPair pair;
             if (loop == null) {
                 assert Logger.lowLevelDebug("event loop not specified, so we ignore the resumer for the ssl buffer pair");
@@ -513,7 +518,7 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
                     32768,
                     loop);
             }
-            return connector.connect(pair.left, pair.right);
+            return connector.connect(WebSocksUtils.getConnectionOpts(), pair.left, pair.right);
         }
 
         static void sendUpgrade(ClientConnectionHandlerContext ctx, String domainOfProxy, String user, String pass) {
@@ -629,7 +634,7 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
             boolean isPooledConn = conn != null;
             if (conn == null) {
                 // retrieve a remote connection
-                SvrHandleConnector connector = servers.get(serverAlias).next();
+                SvrHandleConnector connector = servers.get(serverAlias).next(null/*we ignore the source because it's wrr*/);
                 if (connector == null) {
                     // no connectors for now
                     // the process is definitely cannot proceed
@@ -643,7 +648,9 @@ public class WebSocksProxyAgentConnectorProvider implements Socks5ConnectorProvi
                     if ((Boolean) connector.getData() /*useSSL, see ConfigProcessor*/) {
                         conn = CommonProcess.makeSSLConnection(loop.getSelectorEventLoop(), connector);
                     } else {
-                        conn = connector.connect(RingBuffer.allocateDirect(16384), RingBuffer.allocateDirect(16384));
+                        conn = connector.connect(
+                            WebSocksUtils.getConnectionOpts(),
+                            RingBuffer.allocateDirect(16384), RingBuffer.allocateDirect(16384));
                     }
                 } catch (IOException e) {
                     Logger.error(LogType.CONN_ERROR, "connect to " + connector + " failed", e);

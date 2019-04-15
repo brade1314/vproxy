@@ -1,5 +1,6 @@
 package net.cassite.vproxyx.websocks;
 
+import net.cassite.vproxy.connection.ConnectionOpts;
 import net.cassite.vproxy.http.HttpHeader;
 import net.cassite.vproxy.util.ByteArrayChannel;
 import net.cassite.vproxy.util.LogType;
@@ -232,7 +233,7 @@ public class WebSocksUtils {
         }
 
         try {
-            sslContext = SSLContext.getInstance("TLS");
+            sslContext = SSLContext.getInstance("TLSv1.2");
             sslContext.init(kms, tms, null);
         } catch (KeyManagementException e) {
             sslContext = null;
@@ -266,5 +267,9 @@ public class WebSocksUtils {
             sha256.update(foo.getBytes());
             return Base64.getEncoder().encodeToString(sha256.digest());
         }
+    }
+
+    public static ConnectionOpts getConnectionOpts() {
+        return new ConnectionOpts().setTimeout(60_000);
     }
 }

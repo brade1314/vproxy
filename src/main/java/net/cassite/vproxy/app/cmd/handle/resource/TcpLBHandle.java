@@ -1,13 +1,14 @@
 package net.cassite.vproxy.app.cmd.handle.resource;
 
 import net.cassite.vproxy.app.Application;
+import net.cassite.vproxy.app.Config;
 import net.cassite.vproxy.app.cmd.Command;
 import net.cassite.vproxy.app.cmd.Param;
 import net.cassite.vproxy.app.cmd.Resource;
 import net.cassite.vproxy.app.cmd.handle.param.AddrHandle;
 import net.cassite.vproxy.app.cmd.handle.param.InBufferSizeHandle;
 import net.cassite.vproxy.app.cmd.handle.param.OutBufferSizeHandle;
-import net.cassite.vproxy.app.cmd.handle.param.PersistHandle;
+import net.cassite.vproxy.app.cmd.handle.param.TimeoutHandle;
 import net.cassite.vproxy.component.app.TcpLB;
 import net.cassite.vproxy.component.elgroup.EventLoopGroup;
 import net.cassite.vproxy.component.exception.NotFoundException;
@@ -28,6 +29,7 @@ public class TcpLBHandle {
             throw new Exception(tcpLB.type.fullname + " is on top level");
     }
 
+    @SuppressWarnings("Duplicates")
     public static void checkCreateTcpLB(Command cmd) throws Exception {
         if (!cmd.args.containsKey(Param.elg))
             throw new Exception("missing argument " + Param.elg.fullname);
@@ -50,10 +52,8 @@ public class TcpLBHandle {
         else
             cmd.args.put(Param.outbuffersize, "16384");
 
-        if (cmd.args.containsKey(Param.persist))
-            PersistHandle.check(cmd);
-        else
-            cmd.args.put(Param.persist, "0");
+        if (cmd.args.containsKey(Param.timeout))
+            TimeoutHandle.get(cmd);
     }
 
     public static void checkUpdateTcpLB(Command cmd) throws Exception {
@@ -62,9 +62,6 @@ public class TcpLBHandle {
 
         if (cmd.args.containsKey(Param.outbuffersize))
             OutBufferSizeHandle.check(cmd);
-
-        if (cmd.args.containsKey(Param.persist))
-            PersistHandle.check(cmd);
     }
 
     public static TcpLB get(Resource tcplb) throws NotFoundException {
@@ -85,6 +82,7 @@ public class TcpLBHandle {
         return result;
     }
 
+    @SuppressWarnings("Duplicates")
     public static void add(Command cmd) throws Exception {
         String alias = cmd.resource.alias;
         EventLoopGroup acceptor = Application.get().eventLoopGroupHolder.get(cmd.args.get(Param.aelg));
@@ -93,15 +91,20 @@ public class TcpLBHandle {
         ServerGroups backend = Application.get().serverGroupsHolder.get(cmd.args.get(Param.sgs));
         int inBufferSize = InBufferSizeHandle.get(cmd);
         int outBufferSize = OutBufferSizeHandle.get(cmd);
+        int timeout;
         SecurityGroup secg;
         if (cmd.args.containsKey(Param.secg)) {
             secg = SecurityGroupHandle.get(cmd.args.get(Param.secg));
         } else {
             secg = SecurityGroup.allowAll();
         }
-        int persist = PersistHandle.get(cmd);
+        if (cmd.args.containsKey(Param.timeout)) {
+            timeout = TimeoutHandle.get(cmd);
+        } else {
+            timeout = Config.tcpTimeout;
+        }
         Application.get().tcpLBHolder.add(
-            alias, acceptor, worker, addr, backend, inBufferSize, outBufferSize, secg, persist
+            alias, acceptor, worker, addr, backend, timeout, inBufferSize, outBufferSize, secg
         );
     }
 
@@ -118,8 +121,8 @@ public class TcpLBHandle {
         if (cmd.args.containsKey(Param.outbuffersize)) {
             tcpLB.setOutBufferSize(OutBufferSizeHandle.get(cmd));
         }
-        if (cmd.args.containsKey(Param.persist)) {
-            tcpLB.persistTimeout = PersistHandle.get(cmd);
+        if (cmd.args.containsKey(Param.timeout)) {
+            tcpLB.setTimeout(TimeoutHandle.get(cmd));
         }
     }
 
@@ -135,8 +138,8 @@ public class TcpLBHandle {
             return tcpLB.alias + " -> acceptor " + tcpLB.acceptorGroup.alias + " worker " + tcpLB.workerGroup.alias
                 + " bind " + Utils.ipStr(tcpLB.bindAddress.getAddress().getAddress()) + ":" + tcpLB.bindAddress.getPort()
                 + " backends " + tcpLB.backends.alias
+                + " timeout " + tcpLB.getTimeout()
                 + " in buffer size " + tcpLB.getInBufferSize() + " out buffer size " + tcpLB.getOutBufferSize()
-                + " persist " + tcpLB.persistTimeout
                 + " security-group " + tcpLB.securityGroup.alias;
         }
     }

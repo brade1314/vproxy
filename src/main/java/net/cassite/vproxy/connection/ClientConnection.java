@@ -4,9 +4,8 @@ import net.cassite.vproxy.util.RingBuffer;
 import net.cassite.vproxy.util.Utils;
 
 import java.io.IOException;
-import java.net.*;
-import java.nio.channels.DatagramChannel;
-import java.nio.channels.SelectableChannel;
+import java.net.InetSocketAddress;
+import java.net.StandardSocketOptions;
 import java.nio.channels.SocketChannel;
 
 public class ClientConnection extends Connection {
@@ -16,61 +15,46 @@ public class ClientConnection extends Connection {
         return connector;
     }
 
-    public static ClientConnection create(InetSocketAddress remote, InetAddress local,
-                                          RingBuffer inBuffer, RingBuffer outBuffer) throws IOException {
-        return create(remote, new InetSocketAddress(local, 0), inBuffer, outBuffer);
-    }
-
-    public static ClientConnection create(InetSocketAddress remote, InetSocketAddress local,
+    public static ClientConnection create(InetSocketAddress remote,
+                                          ConnectionOpts opts,
                                           RingBuffer inBuffer, RingBuffer outBuffer) throws IOException {
         SocketChannel channel = SocketChannel.open();
-        channel.configureBlocking(false);
-        channel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-        channel.bind(local);
-        channel.connect(remote);
         try {
-            return new ClientConnection(Protocol.TCP, channel, remote, local, inBuffer, outBuffer);
+            channel.configureBlocking(false);
+            // we want to simply reset the connection when closing
+            channel.setOption(StandardSocketOptions.SO_LINGER, 0);
+            channel.connect(remote);
+            return new ClientConnection(channel, remote, opts, inBuffer, outBuffer);
         } catch (IOException e) {
-            channel.close(); // close the channel if create ClientConnection failed
+            channel.close();
             throw e;
         }
     }
 
-    public static ClientConnection createUDP(InetSocketAddress remote, InetSocketAddress local,
-                                             RingBuffer inBuffer, RingBuffer outBuffer) throws IOException {
-        DatagramChannel channel = DatagramChannel.open(
-            (remote.getAddress() instanceof Inet6Address)
-                ? StandardProtocolFamily.INET6
-                : StandardProtocolFamily.INET
-        );
-        channel.configureBlocking(false);
-        channel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-        channel.bind(local);
-        channel.connect(remote);
-        try {
-            return new ClientConnection(Protocol.UDP, channel, remote, local, inBuffer, outBuffer);
-        } catch (IOException e) {
-            channel.close(); // close the channel if create ClientConnection failed
-            throw e;
-        }
+    private ClientConnection(SocketChannel channel, InetSocketAddress remote,
+                             ConnectionOpts opts,
+                             RingBuffer inBuffer, RingBuffer outBuffer) {
+        super(channel, remote, null, opts, inBuffer, outBuffer);
     }
 
-    private ClientConnection(Protocol protocol, SelectableChannel channel,
-                             InetSocketAddress remote, InetSocketAddress local,
-                             RingBuffer inBuffer, RingBuffer outBuffer) throws IOException {
-        super(protocol, channel, remote, local, inBuffer, outBuffer, true/*it behaves like a connection*/);
-
-        // then let's bind the ET handler
-        // it's useful for udp client because it looks like a connection
-        if (protocol == Protocol.UDP) {
-            this.getInBuffer().addHandler(inBufferETHandler);
+    // generate the id if not specified in constructor
+    void regenId() {
+        if (local != null) {
+            return;
         }
+        InetSocketAddress a;
+        try {
+            a = (InetSocketAddress) channel.getLocalAddress();
+        } catch (IOException ignore) {
+            return;
+        }
+        local = a;
+        _id = genId();
     }
 
     @Override
     protected String genId() {
-        return (protocol == Protocol.UDP ? "UDP:" : "")
-            + (local == null ? "[unbound]" :
+        return (local == null ? "[unbound]" :
             (
                 Utils.ipStr(local.getAddress().getAddress()) + ":" + local.getPort()
             ))

@@ -1,5 +1,6 @@
 package net.cassite.vproxy.poc;
 
+import net.cassite.vproxy.app.Config;
 import net.cassite.vproxy.component.app.TcpLB;
 import net.cassite.vproxy.component.check.HealthCheckConfig;
 import net.cassite.vproxy.component.elgroup.EventLoopGroup;
@@ -16,7 +17,6 @@ import net.cassite.vproxy.selector.SelectorEventLoop;
 import net.cassite.vproxy.util.Utils;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
 @SuppressWarnings("Duplicates")
@@ -38,14 +38,13 @@ public class ForbidLBForEchoServers {
         TcpLB lb = new TcpLB("myLb",
             eventLoopGroup, eventLoopGroup, // use the same group for acceptor and worker
             new InetSocketAddress(18080), serverGroups,
-            8, 4, // make buffers small to demonstrate what happen when buffer is full
-            secg,
-            0
+            Config.tcpTimeout, 8, 4, // make buffers small to demonstrate what happen when buffer is full
+            secg
         );
         lb.start();
         // add each group one server
-        grp1.add("s1", new InetSocketAddress("127.0.0.1", 19080), InetAddress.getByName("127.0.0.1"), 10);
-        grp2.add("s2", new InetSocketAddress("127.0.0.1", 19081), InetAddress.getByName("127.0.0.1"), 10);
+        grp1.add("s1", new InetSocketAddress("127.0.0.1", 19080), 10);
+        grp2.add("s2", new InetSocketAddress("127.0.0.1", 19081), 10);
 
         // start client in another thread
         new Thread(() -> {

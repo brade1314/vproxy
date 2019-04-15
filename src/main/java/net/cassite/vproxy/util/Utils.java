@@ -6,7 +6,6 @@ import net.cassite.vproxy.socks.AddressType;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -35,6 +34,10 @@ public class Utils {
         return sb.toString();
     }
 
+    public static String ipport(InetSocketAddress addr) {
+        return ipStr(addr.getAddress().getAddress()) + ":" + addr.getPort();
+    }
+
     private static String ipv6Str(byte[] ip) {
         return "[" + addTo(4, Integer.toHexString(((ip[0] << 8) & 0xFFFF) | (ip[1] & 0xFF)))
             + ":" + addTo(4, Integer.toHexString(((ip[2] << 8) & 0xFFFF) | (ip[3] & 0xFF)))
@@ -52,6 +55,19 @@ public class Utils {
     }
 
     public static String ipStr(byte[] ip) {
+        { // return 0.0.0.0 if all zero (instead of ipv6 ::)
+            boolean allZero = true;
+            for (int i : ip) {
+                if (i != 0) {
+                    allZero = false;
+                    break;
+                }
+            }
+            if (allZero) {
+                return "0.0.0.0";
+            }
+        }
+
         if (ip.length == 16) {
             return ipv6Str(ip);
         } else if (ip.length == 4) {
@@ -224,7 +240,7 @@ public class Utils {
     }
 
     public static void parseAddress(String address, Callback<byte[], IllegalArgumentException> cb) {
-        Resolver.getDefault().resolve(address, new Callback<InetAddress, UnknownHostException>() {
+        Resolver.getDefault().resolve(address, new Callback<>() {
             @Override
             protected void onSucceeded(InetAddress value) {
                 cb.succeeded(value.getAddress());
@@ -551,41 +567,16 @@ public class Utils {
         return isIpv4(s) || isIpv6(s);
     }
 
-    private static Method getClean;
-    private static Method directClean;
-    private static Method unsafeClean;
     private static Unsafe U;
 
     static {
-        try {
-            getClean = Class.forName("sun.nio.ch.DirectBuffer").getMethod("cleaner");
-            getClean.setAccessible(true);
-
-            directClean = Class.forName("sun.misc.Cleaner").getMethod("clean");
-            directClean.setAccessible(true);
-        } catch (ClassNotFoundException | NoSuchMethodException e) {
-            if (getClean == null) {
-                assert Logger.lowLevelDebug("Reflection failure: no sun.nio.ch.DirectBuffer.cleaner() method found " + e);
-            } else {
-                assert Logger.lowLevelDebug("Reflection failure: no sun.misc.Cleaner.clean() method found " + e);
-            }
-            getClean = null;
-            directClean = null;
-        }
         try {
             Field field = Unsafe.class.getDeclaredField("theUnsafe");
             field.setAccessible(true);
             U = (Unsafe) field.get(null);
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            assert Logger.lowLevelDebug("Reflection failure: get unsafe failed " + e);
-        }
-        try {
-            //noinspection JavaReflectionMemberAccess
-            unsafeClean = Unsafe.class.getMethod("invokeCleaner", ByteBuffer.class);
-            unsafeClean.setAccessible(true);
-        } catch (NoSuchMethodException e) {
-            assert Logger.lowLevelDebug("Reflection failure: no sun.misc.Unsafe.invokeCleaner() method found " + e);
-            unsafeClean = null;
+            Logger.shouldNotHappen("Reflection failure: get unsafe failed " + e);
+            throw new RuntimeException(e);
         }
     }
 
@@ -596,44 +587,15 @@ public class Utils {
             return;
         }
         assert Logger.lowLevelDebug("is direct buffer, do clean");
-        if (directClean != null) {
-            try {
-                directClean.invoke(getClean.invoke(buffer));
-            } catch (Throwable t) {
-                Logger.shouldNotHappen("invoke direct clean failed", t);
-            }
-            return;
-        }
-        if (unsafeClean != null && U != null) {
-            try {
-                unsafeClean.invoke(U, buffer);
-            } catch (Throwable t) {
-                Logger.shouldNotHappen("invoke direct clean failed", t);
-            }
-            return;
-        }
-        Logger.shouldNotHappen("no available cleaner");
+        U.invokeCleaner(buffer);
     }
 
     public static void directConnect(AddressType type, String address, int port, Consumer<Connector> providedCallback) {
-        // we don't know which address to request the remote endpoint,
-        // so we bind all
-        InetAddress local;
-        try {
-            local = InetAddress.getByName("0.0.0.0");
-        } catch (UnknownHostException e) {
-            // this should not happen
-            // should always succeed
-            Logger.shouldNotHappen("getting 0.0.0.0 failed", e);
-            providedCallback.accept(null);
-            return;
-        }
-
         if (type == AddressType.domain) { // resolve if it's domain
-            Resolver.getDefault().resolve(address, new Callback<InetAddress, UnknownHostException>() {
+            Resolver.getDefault().resolve(address, new Callback<>() {
                 @Override
                 protected void onSucceeded(InetAddress value) {
-                    providedCallback.accept(new Connector(new InetSocketAddress(value, port), local));
+                    providedCallback.accept(new Connector(new InetSocketAddress(value, port)));
                 }
 
                 @Override
@@ -658,7 +620,7 @@ public class Utils {
                 providedCallback.accept(null);
                 return;
             }
-            providedCallback.accept(new Connector(new InetSocketAddress(remote, port), local));
+            providedCallback.accept(new Connector(new InetSocketAddress(remote, port)));
         }
     }
 
